@@ -6,16 +6,20 @@
 
 import UIKit
 import iOSMcuManagerLibrary
+import iOSOtaLibrary
 import UniformTypeIdentifiers
+
+// MARK: - FirmwareUpgradeViewController
 
 final class FirmwareUpgradeViewController: UIViewController, McuMgrViewController {
     
-    // MARK: - IBOutlet(s)
+    // MARK: @IBOutlet(s)
     
     @IBOutlet weak var actionSwap: UIButton!
     @IBOutlet weak var actionBuffers: UIButton!
     @IBOutlet weak var actionAlignment: UIButton!
     @IBOutlet weak var actionSelect: UIButton!
+    @IBOutlet weak var actionCheckForUpdates: UIButton!
     @IBOutlet weak var actionStart: UIButton!
     @IBOutlet weak var actionPause: UIButton!
     @IBOutlet weak var actionResume: UIButton!
@@ -31,7 +35,7 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
     @IBOutlet weak var dfuSpeed: UILabel!
     @IBOutlet weak var progress: UIProgressView!
     
-    // MARK: - IBAction(s)
+    // MARK: @IBAction(s)
     
     @IBAction func selectFirmware(_ sender: UIButton) {
         let supportedDocumentTypes = ["com.apple.macbinary-archive", "public.zip-archive", "com.pkware.zip-archive", "com.apple.font-suitcase"]
@@ -41,6 +45,25 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
         importMenu.delegate = self
         importMenu.popoverPresentationController?.sourceView = actionSelect
         present(importMenu, animated: true, completion: nil)
+    }
+    
+    @IBAction func checkForUpdates(_ sender: UIButton) {
+        guard let imageController = parent as? ImageController else { return }
+        
+        otaManager = OTAManager()
+        baseController?.onDeviceStatusReady { [unowned self] in
+            switch imageController.otaStatus {
+            case .unsupported:
+                let alertController = UIAlertController(title: "nRF Cloud Update Unavailable", message: "This device does not support nRF Cloud OTA Updates.", preferredStyle: .alert)
+                baseController?.present(alertController, addingCancelAction: true, cancelActionTitle: "OK")
+            case .missingProjectKey(let deviceInfo, _):
+                setProjectKey(for: deviceInfo)
+            case .supported(let deviceInfo, let projectKey):
+                requestLatestReleaseInfo(for: deviceInfo, using: projectKey)
+            case .none:
+                break
+            }
+        }
     }
     
     @IBAction func eraseApplicationSettingsChanged(_ sender: UISwitch) {
@@ -60,18 +83,8 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
     }
     
     @IBAction func start(_ sender: UIButton) {
-        guard let package else { return }
-        if package.isForSUIT {
-            // SUIT has "no mode" to select
-            // (We use modes in the code only, but SUIT has no concept of upload modes)
-            startFirmwareUpgrade(package: package)
-        } else {
-            if package.images.count > 1, package.images.contains(where: { $0.content == .mcuboot }) {
-                // Force user to select which 'image' to use for bootloader update.
-                selectBootloaderImage(for: package)
-            } else {
-                selectMode(for: package)
-            }
+        baseController?.onDeviceStatusReady { [unowned self] in
+            startPackageDFU()
         }
     }
     
@@ -97,6 +110,8 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
         dfuManager.cancel()
     }
     
+    // MARK: Private Properties
+    
     private var package: McuMgrPackage?
     private var dfuManager: FirmwareUpgradeManager!
     var transport: McuMgrTransport! {
@@ -113,6 +128,15 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
     private var initialBytes: Int = 0
     private var uploadImageSize: Int!
     private var uploadTimestamp: Date!
+    private var otaManager: OTAManager?
+    
+    private var baseController: BaseViewController? {
+        guard let imageController = parent as? ImageController,
+              let baseController = imageController.parent as? BaseViewController else { return nil }
+        return baseController
+    }
+    
+    // MARK: viewDidLoad()
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -120,7 +144,7 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
         restoreBasicSettings()
     }
     
-    // MARK: - Logic
+    // MARK: Logic
     
     private func setSwapTime() {
         let alertController = UIAlertController(title: "Swap time (in seconds)", message: nil, preferredStyle: .actionSheet)
@@ -130,7 +154,7 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
                 self.updateEstimatedSwapTime(to: numberOfSeconds)
             })
         }
-        present(alertController, addingCancelAction: true)
+        baseController?.present(alertController, addingCancelAction: true)
     }
     
     private func setPipelineDepth() {
@@ -143,7 +167,7 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
                 self.updatePipelineDepth(to: value)
             })
         }
-        present(alertController, addingCancelAction: true)
+        baseController?.present(alertController, addingCancelAction: true)
     }
     
     private func setByteAlignment() {
@@ -155,7 +179,103 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
                 self.updateByteAlignment(to: alignmentValue)
             })
         }
-        present(alertController, addingCancelAction: true)
+        baseController?.present(alertController, addingCancelAction: true)
+    }
+    
+    private func setProjectKey(for deviceInfo: DeviceInfoToken) {
+        let alertController = UIAlertController(title: "Missing Project Key", message: "nRF Cloud Project Key is required to continue.", preferredStyle: .alert)
+        alertController.addTextField()
+        alertController.addAction(UIAlertAction(title: "Continue", style: .default) { [unowned self] action in
+            guard let textField = alertController.textFields?.first,
+                  let keyString = textField.text else { return }
+            let key = ProjectKey(keyString)
+            requestLatestReleaseInfo(for: deviceInfo, using: key)
+        })
+        baseController?.present(alertController, addingCancelAction: true)
+    }
+    
+    // MARK: requestLatestReleaseInfo(for:using:)
+    
+    private func requestLatestReleaseInfo(for deviceInfo: DeviceInfoToken,
+                                          using projectKey: ProjectKey) {
+        otaManager?.getLatestReleaseInfo(deviceInfo: deviceInfo, projectKey: projectKey) { [unowned self] result in
+            switch result {
+            case .success(let resultInfo):
+                let alertController = UIAlertController(title: "OTA Update Available", message: nil, preferredStyle: .alert)
+                let artifact: ReleaseArtifact! = resultInfo.artifacts.first
+                let revisionString = resultInfo.revision.isEmpty ? "" : "-\(resultInfo.revision)"
+                alertController.message = """
+                Firmware version \(resultInfo.version)\(revisionString) (\(artifact.sizeString())) is available with the following release notes:
+                
+                \(resultInfo.notes)
+                """
+                alertController.addAction(UIAlertAction(title: "Download", style: .default) { [unowned self] action in
+                    download(release: resultInfo)
+                })
+                baseController?.present(alertController, addingCancelAction: true)
+            case .failure(let otaError):
+                handleLatestReleaseError(otaError)
+            }
+        }
+    }
+    
+    private func handleLatestReleaseError(_ otaError: OTAManagerError) {
+        switch otaError {
+        case .networkError:
+            let alertController = UIAlertController(title: "Network Error", message: "Unable to reach the Network.", preferredStyle: .alert)
+            baseController?.present(alertController, addingCancelAction: true,
+                                    cancelActionTitle: "OK")
+        case .invalidProjectKey(let deviceInfo):
+            setProjectKey(for: deviceInfo)
+        case .deviceIsUpToDate:
+            let alertController = UIAlertController(title: "Your device is up to date", message: "Your device is already using the latest firmware version available through nRF Cloud OTA.", preferredStyle: .alert)
+            baseController?.present(alertController, addingCancelAction: true,
+                                    cancelActionTitle: "OK")
+        default:
+            let alertController = UIAlertController(title: "Error Requesting Update", message: otaError.localizedDescription, preferredStyle: .alert)
+            baseController?.present(alertController, addingCancelAction: true, cancelActionTitle: "OK")
+        }
+    }
+    
+    private func download(release: LatestReleaseInfo) {
+        let artifact: ReleaseArtifact! = release.artifacts.first
+        otaManager?.download(artifact: artifact) { [unowned self] result in
+            switch result {
+            case .success(let fileURL):
+                select(fileURL)
+            case .failure(let error):
+                guard let url = artifact.releaseURL() else { return }
+                onParseError(error, for: url)
+            }
+        }
+    }
+    
+    private func select(_ url: URL) {
+        self.package = nil
+        
+        switch parseAsMcuMgrPackage(url) {
+        case .success(let package):
+            self.package = package
+        case .failure(let error):
+            onParseError(error, for: url)
+        }
+        (parent as? ImageController)?.innerViewReloaded()
+    }
+    
+    private func startPackageDFU() {
+        guard let package else { return }
+        if package.isForSUIT {
+            // SUIT has "no mode" to select
+            // (We use modes in the code only, but SUIT has no concept of upload modes)
+            startFirmwareUpgrade(package: package)
+        } else {
+            if package.images.count > 1, package.images.contains(where: { $0.content == .mcuboot }) {
+                // Force user to select which 'image' to use for bootloader update.
+                selectBootloaderImage(for: package)
+            } else {
+                selectMode(for: package)
+            }
+        }
     }
     
     @IBAction func setEraseApplicationSettings(_ sender: UISwitch) {
@@ -174,7 +294,7 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
                 self.startFirmwareUpgrade(package: package)
             })
         }
-        present(alertController, addingCancelAction: true)
+        baseController?.present(alertController, addingCancelAction: true)
     }
     
     // MARK: selectBootloaderImage(for:)
@@ -229,20 +349,6 @@ final class FirmwareUpgradeViewController: UIViewController, McuMgrViewControlle
         guard updatingUserDefaults else { return }
         UserDefaults.standard.set(eraseApplicationSettings,
                                   forKey: Key.eraseAppSettings.rawValue)
-    }
-    
-    private func present(_ alertViewController: UIAlertController, addingCancelAction addCancelAction: Bool = false) {
-        if addCancelAction {
-            alertViewController.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        }
-        
-        // If the device is an ipad set the popover presentation controller
-        if let presenter = alertViewController.popoverPresentationController {
-            presenter.sourceView = self.view
-            presenter.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 0, height: 0)
-            presenter.permittedArrowDirections = []
-        }
-        present(alertViewController, animated: true)
     }
     
     // MARK: startFirmwareUpgrade
@@ -305,10 +411,13 @@ extension FirmwareUpgradeViewController: FirmwareUpgradeDelegate {
         actionPause.isHidden = false
         actionCancel.isHidden = false
         actionSelect.isEnabled = false
+        actionCheckForUpdates.isEnabled = false
         eraseSwitch.isEnabled = false
         
         initialBytes = 0
         uploadImageSize = nil
+        
+        baseController?.onDFUStart()
     }
     
     func upgradeStateDidChange(from previousState: FirmwareUpgradeState, to newState: FirmwareUpgradeState) {
@@ -316,6 +425,8 @@ extension FirmwareUpgradeViewController: FirmwareUpgradeDelegate {
         switch newState {
         case .none:
             status.text = ""
+        case .resetIntoFirmwareLoader:
+            status.text = "RESETTING INTO FW LOADER MODE..."
         case .requestMcuMgrParameters:
             status.text = "REQUESTING MCUMGR PARAMETERS..."
         case .bootloaderInfo:
@@ -349,6 +460,7 @@ extension FirmwareUpgradeViewController: FirmwareUpgradeDelegate {
         
         actionStart.isEnabled = false
         actionSelect.isEnabled = true
+        actionCheckForUpdates.isEnabled = true
         eraseSwitch.isEnabled = true
         package = nil
     }
@@ -364,6 +476,7 @@ extension FirmwareUpgradeViewController: FirmwareUpgradeDelegate {
         actionStart.isHidden = false
         
         actionSelect.isEnabled = true
+        actionCheckForUpdates.isEnabled = true
         eraseSwitch.isEnabled = true
         status.textColor = .systemRed
         status.text = error.localizedDescription
@@ -381,6 +494,7 @@ extension FirmwareUpgradeViewController: FirmwareUpgradeDelegate {
         actionAlignment.isHidden = false
         actionStart.isHidden = false
         actionSelect.isEnabled = true
+        actionCheckForUpdates.isEnabled = true
         eraseSwitch.isEnabled = true
         status.textColor = .primary
         status.text = "CANCELLED"
@@ -437,15 +551,7 @@ extension FirmwareUpgradeViewController: UIDocumentPickerDelegate {
     
     func documentPicker(_ controller: UIDocumentPickerViewController,
                         didPickDocumentAt url: URL) {
-        self.package = nil
-        
-        switch parseAsMcuMgrPackage(url) {
-        case .success(let package):
-            self.package = package
-        case .failure(let error):
-            onParseError(error, for: url)
-        }
-        (parent as? ImageController)?.innerViewReloaded()
+        select(url)
     }
     
     // MARK: - Private
@@ -467,6 +573,7 @@ extension FirmwareUpgradeViewController: UIDocumentPickerDelegate {
             status.text = "READY"
             status.numberOfLines = 0
             actionStart.isEnabled = true
+            actionCheckForUpdates.isEnabled = true
             
             dfuSwapTime.text = "\(dfuManagerConfiguration.estimatedSwapTime)s"
             dfuSwapTime.numberOfLines = 0

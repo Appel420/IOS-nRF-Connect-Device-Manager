@@ -7,12 +7,16 @@
 import UIKit
 import iOSMcuManagerLibrary
 
-class FilesController: UITableViewController {
+// MARK: - FilesController
+
+final class FilesController: UITableViewController {
     static let partitionKey = "partition"
     /**
     [LittleFS GitHub Project](https://github.com/ARMmbed/littlefs)
      */
     static let defaultPartition = "lfs1"
+    
+    // MARK: - @IBOutlet(s)
     
     @IBOutlet weak var connectionStatus: UILabel!
     @IBOutlet weak var mcuMgrParams: UILabel!
@@ -20,6 +24,8 @@ class FilesController: UITableViewController {
     @IBOutlet weak var bootloaderMode: UILabel!
     @IBOutlet weak var bootloaderSlot: UILabel!
     @IBOutlet weak var kernel: UILabel!
+    @IBOutlet weak var otaStatus: UILabel!
+    @IBOutlet weak var observabilityStatus: UILabel!
     
     var fileDownloadViewController: FileDownloadViewController!
     
@@ -44,6 +50,10 @@ class FilesController: UITableViewController {
     
     override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         return UITableView.automaticDimension
+    }
+    
+    override func tableView(_ tableView: UITableView, accessoryButtonTappedForRowWith indexPath: IndexPath) {
+        (parent as? BaseViewController)?.onDeviceStatusAccessoryTapped(at: indexPath)
     }
     
     func innerViewReloaded() {
@@ -92,7 +102,9 @@ class FilesController: UITableViewController {
     }
 }
 
-extension FilesController: DeviceStatusDelegate {
+// MARK: - DeviceStatusDelegate
+
+extension FilesController: DeviceStatusManager.Delegate {
     
     func connectionStateDidChange(_ state: PeripheralState) {
         connectionStatus.text = state.description
@@ -118,4 +130,11 @@ extension FilesController: DeviceStatusDelegate {
         mcuMgrParams.text = "\(buffers) x \(size) bytes"
     }
     
+    func otaStatusChanged(_ status: OTAStatus) {
+        otaStatus.text = status.description
+    }
+    
+    func observabilityStatusChanged(_ status: ObservabilityStatus, pendingCount: Int, pendingBytes: Int, uploadedCount: Int, uploadedBytes: Int) {
+        observabilityStatus.text = status.description
+    }
 }

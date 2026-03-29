@@ -8,30 +8,41 @@ import UIKit
 import CoreBluetooth
 import iOSMcuManagerLibrary
 
-class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UIPopoverPresentationControllerDelegate, ScannerFilterDelegate {
+// MARK: - ScannerViewController
+
+final class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UIPopoverPresentationControllerDelegate, ScannerFilterDelegate {
+    
+    // MARK: @IBOutlet(s)
     
     @IBOutlet weak var emptyPeripheralsView: UIView!
     @IBOutlet weak var activityIndicator: UIActivityIndicatorView!
     
+    // MARK: Private Properties
+    
+    private var pullToRefreshControl: UIRefreshControl!
     private var centralManager: CBCentralManager!
     private var discoveredPeripherals = [DiscoveredPeripheral]()
     private var filteredPeripherals = [DiscoveredPeripheral]()
     
-    private var filterByUuid: Bool!
+    private var filterByName: Bool!
     private var filterByRssi: Bool!
+    
+    // MARK: @IBAction
     
     @IBAction func aboutTapped(_ sender: UIBarButtonItem) {
         let rootViewController = navigationController as? RootViewController
         rootViewController?.showIntro(animated: true)
     }
     
-    // MARK: - UIViewController
+    // MARK: UIViewController
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         centralManager = CBCentralManager()
         centralManager.delegate = self
         
-        filterByUuid = UserDefaults.standard.bool(forKey: "filterByUuid")
+        // Default to true to filter devices by name
+        filterByName = UserDefaults.standard.object(forKey: "filterByName") != nil ? UserDefaults.standard.bool(forKey: "filterByName") : true
         filterByRssi = UserDefaults.standard.bool(forKey: "filterByRssi")
     }
     
@@ -39,6 +50,11 @@ class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UI
         super.viewWillAppear(animated)
         discoveredPeripherals.removeAll()
         tableView.reloadData()
+        
+        guard pullToRefreshControl == nil else { return }
+        pullToRefreshControl = UIRefreshControl()
+        pullToRefreshControl.addTarget(self, action: #selector(onPullToRefresh(_:)), for: .valueChanged)
+        tableView.refreshControl = pullToRefreshControl
     }
     
     override func viewDidAppear(_ animated: Bool) {
@@ -70,21 +86,25 @@ class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UI
         }
     }
     
-    // MARK: - Segue control
+    // MARK: Segue control
+    
+    private enum Segue: String {
+        case showFilter, connect
+    }
+    
     override func prepare(for segue: UIStoryboardSegue, sender: Any?) {
         let identifier = segue.identifier!
-        switch identifier {
-        case "showFilter":
+        guard let selectedSegue = Segue(rawValue: identifier) else { return }
+        switch selectedSegue {
+        case .showFilter:
             let filterController = segue.destination as! ScannerFilterViewController
             filterController.popoverPresentationController?.delegate = self
-            filterController.filterByUuidEnabled = filterByUuid
+            filterController.filterByNameEnabled = filterByName
             filterController.filterByRssiEnabled = filterByRssi
             filterController.delegate = self
-        case "connect":
+        case .connect:
             let controller = segue.destination as! BaseViewController
             controller.peripheral = (sender as! DiscoveredPeripheral)
-        default:
-            break
         }
     }
     
@@ -94,11 +114,25 @@ class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UI
         return .none
     }
     
-    // MARK: - Filter delegate
-    func filterSettingsDidChange(filterByUuid: Bool, filterByRssi: Bool) {
-        self.filterByUuid = filterByUuid
+    // MARK: Pull-to-refresh
+    
+    @objc private func onPullToRefresh(_ sender: Any?) {
+        if centralManager.isScanning {
+            centralManager.stopScan()
+        }
+        discoveredPeripherals.removeAll()
+        filteredPeripherals.removeAll()
+        tableView.reloadData()
+        pullToRefreshControl.endRefreshing()
+        startScanner()
+    }
+    
+    // MARK: Filter delegate
+    
+    func filterSettingsDidChange(filterByName: Bool, filterByRssi: Bool) {
+        self.filterByName = filterByName
         self.filterByRssi = filterByRssi
-        UserDefaults.standard.set(filterByUuid, forKey: "filterByUuid")
+        UserDefaults.standard.set(filterByName, forKey: "filterByName")
         UserDefaults.standard.set(filterByRssi, forKey: "filterByRssi")
         
         filteredPeripherals.removeAll()
@@ -110,7 +144,8 @@ class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UI
         tableView.reloadData()
     }
     
-    // MARK: - Table view data source
+    // MARK: Table view data source
+    
     override func numberOfSections(in tableView: UITableView) -> Int {
         return 1
     }
@@ -136,10 +171,21 @@ class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UI
         centralManager.stopScan()
         activityIndicator.stopAnimating()
         
-        performSegue(withIdentifier: "connect", sender: filteredPeripherals[indexPath.row])
+        performSegue(withIdentifier: Segue.connect.rawValue,
+                     sender: filteredPeripherals[indexPath.row])
     }
     
-    // MARK: - CBCentralManagerDelegate
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        guard section == 0 else { return nil }
+        return "   Scanner"
+    }
+    
+    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
+        guard section == 0 else { return nil }
+        return "   ⓘ You can Pull-to-refresh this list."
+    }
+    
+    // MARK: CBCentralManagerDelegate
     
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         // Find peripheral among already discovered ones, or create a new
@@ -182,12 +228,13 @@ class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UI
         }
     }
     
-    // MARK: - Private helper methods
+    // MARK: Private helper methods
     
     private func startScanner() {
         activityIndicator.startAnimating()
         let hidService: CBUUID! = CBUUID(string: "1812")
-        let connectedPeripherals = centralManager.retrieveConnectedPeripherals(withServices: [McuMgrBleTransportConstant.SMP_SERVICE, hidService])
+        let defaultTransportConfiguration = DefaultTransportConfiguration()
+        let connectedPeripherals = centralManager.retrieveConnectedPeripherals(withServices: [defaultTransportConfiguration.serviceUUID, hidService])
         for peripheral in connectedPeripherals {
             var advertisementData = [String: Any]()
             advertisementData[CBAdvertisementDataLocalNameKey] = peripheral.name ?? ""
@@ -231,8 +278,12 @@ class ScannerViewController: UITableViewController, CBCentralManagerDelegate, UI
     /// - returns: True, if the peripheral matches the filter,
     ///   false otherwise.
     private func matchesFilters(_ discoveredPeripheral: DiscoveredPeripheral) -> Bool {
-        if filterByUuid && discoveredPeripheral.advertisedServices?.contains(McuMgrBleTransportConstant.SMP_SERVICE) != true {
-            return false
+        // Filter by name if the name filter switch is on
+        if filterByName {
+            // Only show devices with a name (not "N/A" or empty)
+            if discoveredPeripheral.advertisedName.isEmpty || discoveredPeripheral.advertisedName == "N/A" {
+                return false
+            }
         }
         if filterByRssi && discoveredPeripheral.highestRSSI.decimalValue < -50 {
             return false

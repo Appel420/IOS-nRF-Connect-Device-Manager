@@ -7,16 +7,30 @@
 import UIKit
 import iOSMcuManagerLibrary
 
-class ImageController: UITableViewController {
+// MARK: - ImageController
+
+final class ImageController: UITableViewController {
+    
+    // MARK: @IBOutlet(s)
+    
     @IBOutlet weak var connectionStatus: UILabel!
     @IBOutlet weak var mcuMgrParams: UILabel!
     @IBOutlet weak var bootloaderName: UILabel!
     @IBOutlet weak var bootloaderMode: UILabel!
     @IBOutlet weak var bootloaderSlot: UILabel!
     @IBOutlet weak var kernel: UILabel!
+    @IBOutlet weak var otaStatusLabel: UILabel!
+    @IBOutlet weak var observabilityStatus: UILabel!
+    
+    // MARK: Private Properties
+    
     /// Instance if Images View Controller, required to get its
     /// height when data are obtained and height changes.
     private var imagesViewController: ImagesViewController!
+    
+    var otaStatus: OTAStatus?
+    
+    // MARK: UIViewController
     
     override func viewDidAppear(_ animated: Bool) {
         showModeSwitch()
@@ -41,13 +55,18 @@ class ImageController: UITableViewController {
         return UITableView.automaticDimension
     }
     
+    override func tableView(_ tableView: UITableView, accessoryButtonTappedForRowWith indexPath: IndexPath) {
+        (parent as? BaseViewController)?.onDeviceStatusAccessoryTapped(at: indexPath)
+    }
+    
     func innerViewReloaded() {
         tableView.beginUpdates()
         tableView.setNeedsDisplay()
         tableView.endUpdates()
     }
     
-    // MARK: - Handling Basic / Advanced mode
+    // MARK: Handling Basic / Advanced mode
+    
     private var advancedMode: Bool = false
     
     @objc func modeSwitched() {
@@ -99,7 +118,9 @@ class ImageController: UITableViewController {
     }
 }
 
-extension ImageController: DeviceStatusDelegate {
+// MARK: - DeviceStatusDelegate
+
+extension ImageController: DeviceStatusManager.Delegate {
     
     func connectionStateDidChange(_ state: PeripheralState) {
         connectionStatus.text = state.description
@@ -125,4 +146,12 @@ extension ImageController: DeviceStatusDelegate {
         mcuMgrParams.text = "\(buffers) x \(size) bytes"
     }
     
+    func otaStatusChanged(_ status: OTAStatus) {
+        otaStatusLabel.text = status.description
+        otaStatus = status
+    }
+    
+    func observabilityStatusChanged(_ status: ObservabilityStatus, pendingCount: Int, pendingBytes: Int, uploadedCount: Int, uploadedBytes: Int) {
+        observabilityStatus.text = status.description
+    }
 }

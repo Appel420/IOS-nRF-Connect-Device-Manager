@@ -5,27 +5,54 @@
  */
 
 import UIKit
-import iOSMcuManagerLibrary
 import CoreBluetooth
+import iOSMcuManagerLibrary
+import iOSOtaLibrary
 
-// MARK: - DeviceStatusDelegate
+// MARK: - DeviceStatusRow
 
-protocol DeviceStatusDelegate: AnyObject {
-    func connectionStateDidChange(_ state: PeripheralState)
-    func bootloaderNameReceived(_ name: String)
-    func bootloaderModeReceived(_ mode: BootloaderInfoResponse.Mode)
-    func bootloaderSlotReceived(_ slot: UInt64)
-    func appInfoReceived(_ output: String)
-    func mcuMgrParamsReceived(buffers: Int, size: Int)
+enum DeviceStatusRow: Int, CustomStringConvertible {
+    case connection
+    case mcuMgrParameters
+    case bootloaderName
+    case bootloaderMode
+    case bootloaderSlot
+    case kernel
+    case otaStatus
+    case observabilityStatus
+    
+    var description: String {
+        switch self {
+        case .connection:
+            return "Connection"
+        case .mcuMgrParameters:
+            return "MCU Manager Parameters / Buffer Details"
+        case .bootloaderName:
+            return "Bootloader Name"
+        case .bootloaderMode:
+            return "Bootloader Mode"
+        case .bootloaderSlot:
+            return "Bootlaoder Slot"
+        case .kernel:
+            return "Kernel"
+        case .otaStatus:
+            return "OTA"
+        case .observabilityStatus:
+            return "Observability"
+        }
+    }
 }
 
 // MARK: - BaseViewController
 
 final class BaseViewController: UITabBarController {
-    weak var deviceStatusDelegate: DeviceStatusDelegate? {
+    
+    // MARK: Properties
+    
+    weak var deviceStatusDelegate: DeviceStatusManager.Delegate? {
         didSet {
-            if let state {
-                deviceStatusDelegate?.connectionStateDidChange(state)
+            if let peripheralState {
+                deviceStatusDelegate?.connectionStateDidChange(peripheralState)
             }
             if let bootloader {
                 deviceStatusDelegate?.bootloaderNameReceived(bootloader.description)
@@ -40,20 +67,16 @@ final class BaseViewController: UITabBarController {
                 deviceStatusDelegate?.appInfoReceived(appInfoOutput)
             }
             if let mcuMgrParams {
-                deviceStatusDelegate?.mcuMgrParamsReceived(buffers: mcuMgrParams.buffers, size: mcuMgrParams.size)
+                deviceStatusDelegate?.mcuMgrParamsReceived(buffers: mcuMgrParams.bufferCount, size: mcuMgrParams.bufferSize)
+            }
+            if let otaStatus {
+                deviceStatusDelegate?.otaStatusChanged(otaStatus)
+            }
+            if let observabilityStatus {
+                deviceStatusDelegate?.observabilityStatusChanged(observabilityStatus, pendingCount: observabilityPendingChunks, pendingBytes: observabilityPendingBytes, uploadedCount: observabilityUploadedChunks, uploadedBytes: observabilityUploadedBytes)
             }
         }
     }
-    
-    /**
-     Keep an independent transport for any requests ``BaseViewController`` might do.
-     
-     This is to prevent overlap of sequence numbers used by parallel operations, such
-     as ``FirmwareUpgradeManager`` and this ``BaseViewController`` launching parallel requests
-     for Bootloader Information, and having them land on the same `McuSequenceNumber` which
-     will trigger an assertion failure, specifically in ``McuMgrBleTransport``.
-     */
-    private var privateTransport: McuMgrTransport!
     
     /**
      Shared ``McuMgrTransport`` for subclasses to use.
@@ -66,24 +89,38 @@ final class BaseViewController: UITabBarController {
             bleTransport.logDelegate = UIApplication.shared.delegate as? McuMgrLogDelegate
             bleTransport.delegate = self
             transport = bleTransport
-            // Independent transport for BaseViewController operations.
-            privateTransport = McuMgrBleTransport(peripheral.basePeripheral)
         }
     }
     
-    private var state: PeripheralState? {
+    // MARK: Private Properties
+    
+    private var deviceStatusManager: DeviceStatusManager?
+    
+    private var observabilityTask: Task<Void, Never>?
+    private var observabilityIdentifier: UUID?
+    private var observabilityManager: ObservabilityManager?
+    private var observabilityPendingChunks: Int = 0
+    private var observabilityPendingBytes: Int = 0
+    private var observabilityUploadedBytes: Int = 0
+    private var observabilityUploadedChunks: Int = 0
+    
+    private var deviceInfoRequested: Bool = false
+    private var statusInfoCallback: (() -> ())?
+    
+    private var peripheralState: PeripheralState? {
         didSet {
-            if let state {
-                deviceStatusDelegate?.connectionStateDidChange(state)
-            }
+            guard let peripheralState else { return }
+            deviceStatusDelegate?.connectionStateDidChange(peripheralState)
         }
     }
+    
     private var bootloader: BootloaderInfoResponse.Bootloader? {
         didSet {
             guard let bootloader else { return }
             deviceStatusDelegate?.bootloaderNameReceived(bootloader.description)
         }
     }
+    
     private var bootloaderMode: BootloaderInfoResponse.Mode? {
         didSet {
             if let bootloaderMode {
@@ -91,27 +128,43 @@ final class BaseViewController: UITabBarController {
             }
         }
     }
+    
     private var bootloaderSlot: UInt64? {
         didSet {
-            if let bootloaderSlot {
-                deviceStatusDelegate?.bootloaderSlotReceived(bootloaderSlot)
-            }
+            guard let bootloaderSlot else { return }
+            deviceStatusDelegate?.bootloaderSlotReceived(bootloaderSlot)
         }
     }
+    
     private var appInfoOutput: String? {
         didSet {
-            if let appInfoOutput {
-                deviceStatusDelegate?.appInfoReceived(appInfoOutput)
-            }
+            guard let appInfoOutput else { return }
+            deviceStatusDelegate?.appInfoReceived(appInfoOutput)
         }
     }
-    private var mcuMgrParams: (buffers: Int, size: Int)? {
+    
+    private var mcuMgrParams: (bufferCount: Int, bufferSize: Int)? {
         didSet {
-            if let mcuMgrParams {
-                deviceStatusDelegate?.mcuMgrParamsReceived(buffers: mcuMgrParams.buffers, size: mcuMgrParams.size)
-            }
+            guard let mcuMgrParams else { return }
+            deviceStatusDelegate?.mcuMgrParamsReceived(buffers: mcuMgrParams.bufferCount, size: mcuMgrParams.bufferSize)
         }
     }
+    
+    private var otaStatus: OTAStatus? {
+        didSet {
+            guard let otaStatus else { return }
+            deviceStatusDelegate?.otaStatusChanged(otaStatus)
+        }
+    }
+    
+    private var observabilityStatus: ObservabilityStatus? {
+        didSet {
+            guard let observabilityStatus else { return }
+            deviceStatusDelegate?.observabilityStatusChanged(observabilityStatus, pendingCount: observabilityPendingChunks, pendingBytes: observabilityPendingBytes, uploadedCount: observabilityUploadedChunks, uploadedBytes: observabilityUploadedBytes)
+        }
+    }
+    
+    // MARK: viewDidLoad()
     
     override func viewDidLoad() {
         title = peripheral.advertisedName
@@ -130,8 +183,237 @@ final class BaseViewController: UITabBarController {
         }
     }
     
+    // MARK: viewWillDisappear()
+    
     override func viewWillDisappear(_ animated: Bool) {
+        disconnect()
+    }
+    
+    // MARK: disconnect()
+    
+    func disconnect() {
+        if let observabilityIdentifier {
+            observabilityManager?.disconnect(from: observabilityIdentifier)
+            observabilityTask?.cancel()
+            observabilityTask = nil
+        }
         transport?.close()
+    }
+}
+
+// MARK: Device Status
+
+extension BaseViewController {
+    
+    func onDeviceStatusReady(_ callback: @escaping () -> Void) {
+        statusInfoCallback = callback
+        guard !deviceInfoRequested else {
+            onDeviceStatusFinished()
+            return
+        }
+        
+        if deviceStatusManager == nil {
+            deviceStatusManager = DeviceStatusManager(
+                transport, logDelegate: UIApplication.shared.delegate as? McuMgrLogDelegate
+            )
+        }
+        guard let deviceStatusManager else { return }
+        
+        Task { @MainActor in
+            await deviceStatusManager.requestStatus()
+            
+            if let bufferSize = deviceStatusManager.bufferSize,
+                let bufferCount = deviceStatusManager.bufferCount {
+                mcuMgrParams = (Int(bufferSize), Int(bufferCount))
+            }
+            appInfoOutput = deviceStatusManager.appInfoOutput
+            bootloader = deviceStatusManager.bootloader
+            bootloaderMode = deviceStatusManager.bootloaderMode
+            bootloaderSlot = deviceStatusManager.bootloaderSlot
+            
+            guard let peripheral = peripheral?.basePeripheral else {
+                onDeviceStatusFinished()
+                return
+            }
+            await deviceStatusManager.requestOTAStatus(for: peripheral.identifier)
+            otaStatus = deviceStatusManager.otaStatus
+            onDeviceStatusFinished()
+        }
+    }
+    
+    // MARK: onDeviceStatusFinished
+    
+    private func onDeviceStatusFinished() {
+        guard let statusInfoCallback else { return }
+        statusInfoCallback()
+        deviceInfoRequested = true
+        self.statusInfoCallback = nil
+    }
+}
+ 
+// MARK: - Observability
+
+extension BaseViewController {
+        
+    func observabilityButtonTapped() {
+        guard let observabilityIdentifier else {
+            onDeviceStatusReady {} // Full Reconnection
+            return
+        }
+        
+        switch observabilityStatus {
+        case .receivedEvent(let event):
+            switch event {
+            case .online(false):
+                do {
+                    try observabilityManager?.continuePendingUploads(for: observabilityIdentifier)
+                } catch {
+                    print("RETRY Error: \(error.localizedDescription)")
+                }
+            default:
+                disconnect()
+            }
+        default:
+            disconnect()
+        }
+    }
+    
+    private func launchObservabilityTask() {
+        observabilityTask = Task { @MainActor [unowned self] in
+            let manager: ObservabilityManager! = observabilityManager
+            let observabilityIdentifier: UUID! = observabilityIdentifier
+            let observabilityStream = manager.connectToDevice(observabilityIdentifier)
+            do {
+                for try await event in observabilityStream {
+                    processObservabilityEvent(event.event)
+                    observabilityStatus = .receivedEvent(event.event)
+                }
+                print("STOPPED Listening to \(observabilityIdentifier.uuidString) Connection Events.")
+                observabilityStatus = .connectionClosed
+            } catch let obsError as ObservabilityError {
+                print("CAUGHT ObservabilityManagerError \(obsError.localizedDescription)")
+                switch obsError {
+                case .mdsServiceNotFound:
+                    observabilityStatus = .unsupported(obsError)
+                case .pairingError:
+                    observabilityStatus = .pairingError
+                default:
+                    observabilityStatus = .errorEvent(obsError)
+                }
+                stopObservabilityManagerAndTask()
+            } catch let error {
+                print("CAUGHT Error \(error.localizedDescription) Listening to \(observabilityIdentifier.uuidString) Connection Events.")
+                observabilityStatus = .errorEvent(error)
+                stopObservabilityManagerAndTask()
+            }
+        }
+    }
+    
+    // MARK: processObservabilityEvent
+    
+    private func processObservabilityEvent(_ observabilityEvent: ObservabilityDeviceEvent) {
+        switch observabilityEvent {
+        case .connected:
+            // Reset since on Observability Connection we'll get a report of pending chunks.
+            observabilityPendingBytes = 0
+            observabilityPendingChunks = 0
+        case .updatedChunk(let chunk):
+            switch chunk.status {
+            case .pendingUpload:
+                observabilityPendingBytes += chunk.data.count
+                observabilityPendingChunks += 1
+            case .success:
+                observabilityPendingBytes -= chunk.data.count
+                observabilityPendingChunks -= 1
+                
+                observabilityUploadedBytes += chunk.data.count
+                observabilityUploadedChunks += 1
+            default:
+                break
+            }
+        default:
+            break
+        }
+    }
+    
+    private func stopObservabilityManagerAndTask() {
+        guard let observabilityIdentifier else { return }
+        print(#function)
+        observabilityManager?.disconnect(from: observabilityIdentifier)
+        observabilityManager = nil
+        
+        observabilityTask?.cancel()
+        observabilityTask = nil
+        self.observabilityIdentifier = nil
+    }
+}
+
+// MARK: - onDeviceStatusAccessoryTapped
+
+extension BaseViewController {
+    
+    func onDeviceStatusAccessoryTapped(at indexPath: IndexPath) {
+        guard let statusRow = DeviceStatusRow(rawValue: indexPath.row) else { return }
+        let helpDialogAlertController = UIAlertController(title: "\(statusRow) Help", message: nil, preferredStyle: .alert)
+        switch statusRow {
+        case .connection:
+            helpDialogAlertController.message = "\nReports the status of the Bluetooth LE connection to the device."
+        case .mcuMgrParameters:
+            helpDialogAlertController.message = "\nNumber of MCU Manager buffers and their size. Requires MCU Mgr Parameters command in OS Group."
+        case .bootloaderName:
+            helpDialogAlertController.message = "\nName of the Bootloader. Requires Bootloader Info command in OS Group."
+        case .bootloaderMode:
+            helpDialogAlertController.message = "\nMode of the MCUboot Bootloader."
+        case .bootloaderSlot:
+            helpDialogAlertController.message = "\nAlso known as \"Active B0 Slot\"; slot from which nRF Secure Immutable Bootloader (NSIB), also known as B0, booted the Application."
+        case .kernel:
+            helpDialogAlertController.message = "\nKernel name and version. Requires Application Info command in OS Group."
+        case .otaStatus:
+            helpDialogAlertController.message = "\nReports whether Firmware Over-the-Air (OTA) Updates via nRF Cloud are supported in this device."
+            if let url = URL(string: "https://docs.nordicsemi.com/bundle/nrf-cloud/page/Devices/FirmwareUpdate/FOTAOverview.html") {
+                helpDialogAlertController.addAction(UIAlertAction(title: "OTA Documentation", style: .default, handler: { _ in
+                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                }))
+            }
+        case .observabilityStatus:
+            helpDialogAlertController.message = "\nReports whether nRF Cloud Observability is supported and active for this device. nRF Cloud Observability allows collecting and analysing on-device metrics such as coredumps and logs from devices in your fleet. Useful for debugging bugs & crashes."
+            if let url = URL(string: "https://docs.nordicsemi.com/bundle/nrf-cloud/page/index.html") {
+                helpDialogAlertController.addAction(UIAlertAction(title: "Discover nRF Cloud", style: .default, handler: { _ in
+                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                }))
+            }
+        }
+        present(helpDialogAlertController, addingCancelAction: true, cancelActionTitle: "OK")
+    }
+}
+
+// MARK: - Present Dialog
+
+extension BaseViewController {
+    
+    func present(_ alertViewController: UIAlertController,
+                 addingCancelAction addCancelAction: Bool = false,
+                 cancelActionTitle: String = "Cancel") {
+        if addCancelAction {
+            alertViewController.addAction(UIAlertAction(title: cancelActionTitle, style: .cancel))
+        }
+        
+        // If the device is an ipad set the popover presentation controller
+        if let presenter = alertViewController.popoverPresentationController {
+            presenter.sourceView = self.view
+            presenter.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 0, height: 0)
+            presenter.permittedArrowDirections = []
+        }
+        present(alertViewController, animated: true)
+    }
+}
+
+// MARK: - onDFUStart
+
+extension BaseViewController {
+    
+    func onDFUStart() {
+        stopObservabilityManagerAndTask()
     }
 }
 
@@ -140,32 +422,19 @@ final class BaseViewController: UITabBarController {
 extension BaseViewController: PeripheralDelegate {
     
     func peripheral(_ peripheral: CBPeripheral, didChangeStateTo state: PeripheralState) {
-        self.state = state
-        if state == .connected {
-            let defaultManager = DefaultManager(transport: privateTransport)
-            defaultManager.logDelegate = UIApplication.shared.delegate as? McuMgrLogDelegate
-            defaultManager.params { [weak self] response, error in
-                if let count = response?.bufferCount,
-                   let size = response?.bufferSize {
-                    self?.mcuMgrParams = (Int(count), Int(size))
-                }
-                defaultManager.applicationInfo(format: [.kernelName, .kernelVersion]) { [weak self] response, error in
-                    self?.appInfoOutput = response?.response
-
-                    defaultManager.bootloaderInfo(query: .name) { [weak self] response, error in
-                        self?.bootloader = response?.bootloader
-                        guard response?.bootloader == .mcuboot else { return }
-                        defaultManager.bootloaderInfo(query: .mode) { [weak self] response, error in
-                            self?.bootloaderMode = response?.mode
-                        }
-                        
-                        defaultManager.bootloaderInfo(query: .slot) { [weak self] response, error in
-                            self?.bootloaderSlot = response?.activeSlot
-                        }
-                    }
-                }
-            }
+        peripheralState = state
+        switch state {
+        case .connected:
+            observabilityManager = ObservabilityManager()
+            observabilityIdentifier = peripheral.identifier
+            launchObservabilityTask()
+        case .disconnecting, .disconnected:
+            // Set to false, because a DFU update might change things if that's what happened.
+            deviceInfoRequested = false
+            stopObservabilityManagerAndTask()
+        default:
+            // Nothing to do here.
+            break
         }
     }
-    
 }

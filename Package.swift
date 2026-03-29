@@ -4,28 +4,50 @@ import PackageDescription
 
 let package = Package(
     name: "iOSMcuManagerLibrary",
-    platforms: [.iOS(.v12), .macOS(.v10_13)],
+    platforms: [.iOS(.v13), .macOS(.v10_15)],
     products: [
         .library(
             name: "iOSMcuManagerLibrary",
             targets: ["iOSMcuManagerLibrary"]
         ),
+        .library(
+            name: "iOSOtaLibrary",
+            targets: ["iOSOtaLibrary"]
+        ),
     ],
     dependencies: [
         .package(
             url: "https://github.com/valpackett/SwiftCBOR.git",
-            .exact("0.4.7")
+            .exact("0.5.0")
         ),
-        .package(url: "https://github.com/weichsel/ZIPFoundation.git",
-            .upToNextMajor(from: "0.9.0")
+        .package(
+            url: "https://github.com/weichsel/ZIPFoundation.git",
+            .exact("0.9.19")
+        ),
+        .package(
+            url: "https://github.com/NordicSemiconductor/IOS-BLE-Library",
+            .exact("0.4.4")
+        ),
+        .package(
+            url: "https://github.com/NordicPlayground/IOS-Common-Libraries",
+            .exact("0.2.0")
         )
     ],
     targets: [
         .target(
             name: "iOSMcuManagerLibrary",
             dependencies: ["SwiftCBOR", "ZIPFoundation"],
-            path: "Source",
-            exclude:["Info.plist"]
+            path: "iOSMcuManagerLibrary/Source",
+            exclude: ["Info.plist"]
+        ),
+        .target(
+            name: "iOSOtaLibrary",
+            dependencies: [
+                .byNameItem(name: "iOSMcuManagerLibrary", condition: nil),
+                .product(name: "iOS-BLE-Library-Mock", package: "IOS-BLE-Library"),
+                .product(name: "iOSCommonLibraries", package: "IOS-Common-Libraries")
+            ],
+            path: "iOSOtaLibrary/Source"
         )
     ]
 )

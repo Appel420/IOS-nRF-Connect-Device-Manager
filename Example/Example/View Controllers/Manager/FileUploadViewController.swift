@@ -8,8 +8,12 @@ import UIKit
 import iOSMcuManagerLibrary
 import UniformTypeIdentifiers
 
+// MARK: - FileUploadViewController
+
 class FileUploadViewController: UIViewController, McuMgrViewController {
 
+    // MARK: @IBOutlet(s)
+    
     @IBOutlet weak var fileName: UILabel!
     @IBOutlet weak var fileSize: UILabel!
     @IBOutlet weak var destination: UILabel!
@@ -22,6 +26,8 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
     @IBOutlet weak var actionResume: UIButton!
     @IBOutlet weak var actionCancel: UIButton!
     
+    // MARK: @IBAction(s)
+    
     @IBAction func selectFile(_ sender: UIButton) {
         let supportedDocumentTypes = ["public.data", "public.content"]
         let importMenu = UIDocumentPickerViewController(documentTypes: supportedDocumentTypes,
@@ -31,9 +37,11 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
         importMenu.popoverPresentationController?.sourceView = actionSelect
         present(importMenu, animated: true, completion: nil)
     }
+    
     @IBAction func start(_ sender: UIButton) {
-        let downloadViewController = (parent as? FilesController)?.fileDownloadViewController
-        downloadViewController?.addRecent(fileName.text!)
+        guard let destination = destination.text, let fileData,
+              let filesViewController = parent as? FilesController,
+              let baseController = filesViewController.parent as? BaseViewController else { return }
         
         actionStart.isHidden = true
         actionPause.isHidden = false
@@ -41,8 +49,16 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
         actionSelect.isEnabled = false
         status.textColor = .primary
         status.text = "UPLOADING..."
-        _ = fsManager.upload(name: destination.text!, data: fileData!, delegate: self)
+        
+        if let downloadViewController = filesViewController.fileDownloadViewController {
+            downloadViewController.addRecent(fileName.text!)
+        }
+        baseController.onDeviceStatusReady { [unowned self] in
+            _ = fsManager.upload(name: destination, data: fileData,
+                                 delegate: self)
+        }
     }
+    
     @IBAction func pause(_ sender: UIButton) {
         status.textColor = .primary
         status.text = "PAUSED"
@@ -50,6 +66,7 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
         actionResume.isHidden = false
         fsManager.pauseTransfer()
     }
+    
     @IBAction func resume(_ sender: UIButton) {
         status.textColor = .primary
         status.text = "UPLOADING..."
@@ -57,6 +74,7 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
         actionResume.isHidden = true
         fsManager.continueTransfer()
     }
+    
     @IBAction func cancel(_ sender: UIButton) {
         fsManager.cancelTransfer()
     }
@@ -67,6 +85,8 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
             fsManager.logDelegate = UIApplication.shared.delegate as? McuMgrLogDelegate
         }
     }
+    
+    // MARK: Private Properties
     
     private var fsManager: FileSystemManager!
     private var fileData: Data?
@@ -86,6 +106,8 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
         }
     }
     
+    // MARK: UIViewController API
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -96,6 +118,8 @@ class FileUploadViewController: UIViewController, McuMgrViewController {
         refreshDestination()
     }
 }
+
+// MARK: - FileUploadDelegate
 
 extension FileUploadViewController: FileUploadDelegate {
     
@@ -118,7 +142,7 @@ extension FileUploadViewController: FileUploadDelegate {
             speedInKiloBytesPerSecond = Double(fileSize - initialBytes) / msSinceUploadBegan
         }
         
-        status.text = "UPLOADING... (\(String(format: "%.2f", speedInKiloBytesPerSecond))) kB/s)"
+        status.text = "UPLOADING... (\(String(format: "%.2f", speedInKiloBytesPerSecond)) kB/s)"
         progress.setProgress(Float(bytesSent) / Float(fileSize), animated: true)
     }
     
@@ -158,7 +182,7 @@ extension FileUploadViewController: FileUploadDelegate {
     }
 }
 
-// MARK: - Document Picker
+// MARK: - UIDocumentPickerDelegate
 
 extension FileUploadViewController: UIDocumentPickerDelegate {
     
